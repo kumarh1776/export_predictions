@@ -1,0 +1,43 @@
+# Configuration file for export predictions framework
+
+# Data sources
+data_sources:
+  taiwan_exports:
+    raw_file: "data/raw/taiwan_exports_history.csv"
+    processed_file: "data/processed/taiwan_exports_monthly.csv"
+    commodity_codes:
+      - "84714100005"
+      - "84714900007"
+      - "84718000007"
+  
+  # Add more data sources here as you expand
+  # nvidia_revenue:
+  #   source: "api"  # or "file", "database"
+  #   api_key: null
+  #   file_path: null
+
+# Model configuration
+model:
+  type: "ridge"  # "linear", "ridge", "lasso", "elastic_net"
+  test_size: 0.2
+  random_state: 42
+  ridge_alpha: 1.0
+  
+  # Feature engineering
+  features:
+    lags: [1, 2, 3]
+    rolling_windows: [3, 6, 12]
+    include_time_features: true
+    include_growth_rates: true
+
+# Prediction settings
+prediction:
+  forecast_horizon: 12  # months
+  confidence_intervals: true
+  save_predictions: true
+
+# Output settings
+output:
+  save_plots: true
+  plot_format: "png"
+  plot_dpi: 150
