@@ -45,9 +45,9 @@ models/*.pkl
 models/*.joblib
 !models/.gitkeep
 
-# Plots
-notebooks/*.png
-notebooks/*.pdf
+# Plots (commented out to allow PNGs in repo)
+# notebooks/*.png
+# notebooks/*.pdf
 
 # OS
 .DS_Store
