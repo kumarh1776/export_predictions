@@ -1,4 +1,4 @@
-"""Predict Nvidia data center revenue using Taiwan exports data."""
+"""Predict Nvidia quarterly data center revenue using Taiwan monthly exports data."""
 
 import pandas as pd
 import numpy as np
@@ -27,39 +27,80 @@ def load_taiwan_exports():
     return df
 
 def fetch_nvidia_data():
-    """Load Nvidia data center revenue (monthly, converted from quarterly reports)."""
-    file_path = PROCESSED_DATA_DIR / "nvidia_data_center_revenue_monthly.csv"
+    """Load Nvidia data center revenue (quarterly)."""
+    file_path = PROCESSED_DATA_DIR / "nvidia_data_center_revenue_quarterly.csv"
     if not file_path.exists():
         print(f"Nvidia data not found: {file_path}. Run process_nvidia_data.py first.")
         return None
     df = pd.read_csv(file_path)
-    df['date'] = pd.to_datetime(df['date'])
-    return {'date': df['date'].values, 'data_center_revenue_millions': df['data_center_revenue_millions'].values}
+    df['quarter_end_date'] = pd.to_datetime(df['quarter_end_date'])
+    return df
 
-def create_features(df):
-    """Create time series features: lags, rolling averages, growth rates, and time indicators."""
-    df = df.copy().sort_values('date').reset_index(drop=True)
+def get_nvidia_quarter_for_month(date):
+    """Map a calendar month to Nvidia fiscal quarter end date.
     
-    # Lag features (previous months)
-    df['exports_lag1'] = df['monthly_exports_usd_millions'].shift(1)
-    df['exports_lag2'] = df['monthly_exports_usd_millions'].shift(2)
-    df['exports_lag3'] = df['monthly_exports_usd_millions'].shift(3)
+    Nvidia fiscal quarters:
+    - Q1: Feb, Mar, Apr -> ends in April
+    - Q2: May, Jun, Jul -> ends in July
+    - Q3: Aug, Sep, Oct -> ends in October
+    - Q4: Nov, Dec, Jan -> ends in January (next year)
+    """
+    month = date.month
+    year = date.year
     
-    # Rolling averages
-    df['exports_ma3'] = df['monthly_exports_usd_millions'].rolling(window=3).mean()
-    df['exports_ma6'] = df['monthly_exports_usd_millions'].rolling(window=6).mean()
-    df['exports_ma12'] = df['monthly_exports_usd_millions'].rolling(window=12).mean()
+    if month in [2, 3, 4]:
+        return pd.Timestamp(year=year, month=4, day=1)  # Q1 ends in Apr
+    elif month in [5, 6, 7]:
+        return pd.Timestamp(year=year, month=7, day=1)  # Q2 ends in Jul
+    elif month in [8, 9, 10]:
+        return pd.Timestamp(year=year, month=10, day=1)  # Q3 ends in Oct
+    elif month in [11, 12]:
+        return pd.Timestamp(year=year, month=1, day=1)  # Q4 ends in Jan (same fiscal year)
+    else:  # month == 1
+        return pd.Timestamp(year=year, month=1, day=1)  # Q4 ends in Jan (current year)
+
+def aggregate_to_quarters(taiwan_df):
+    """Aggregate monthly Taiwan exports to Nvidia fiscal quarters."""
+    taiwan_df = taiwan_df.copy()
     
-    # Growth rates
-    df['exports_yoy'] = df['monthly_exports_usd_millions'].pct_change(periods=12)
-    df['exports_mom'] = df['monthly_exports_usd_millions'].pct_change(periods=1)
+    # Map each month to its Nvidia fiscal quarter end date
+    taiwan_df['quarter_end_date'] = taiwan_df['date'].apply(get_nvidia_quarter_for_month)
+    
+    # Aggregate: sum monthly exports for each quarter
+    quarterly_exports = taiwan_df.groupby('quarter_end_date').agg({
+        'monthly_exports_usd_millions': 'sum',
+        'date': 'count'  # Count months per quarter (should be 3)
+    }).reset_index()
+    
+    quarterly_exports.columns = ['quarter_end_date', 'quarterly_exports_usd_millions', 'month_count']
+    
+    # Create features from quarterly aggregated data
+    quarterly_exports = quarterly_exports.sort_values('quarter_end_date').reset_index(drop=True)
+    
+    # Lag features (previous quarters)
+    quarterly_exports['exports_lag1'] = quarterly_exports['quarterly_exports_usd_millions'].shift(1)
+    quarterly_exports['exports_lag2'] = quarterly_exports['quarterly_exports_usd_millions'].shift(2)
+    quarterly_exports['exports_lag3'] = quarterly_exports['quarterly_exports_usd_millions'].shift(3)
+    
+    # Rolling averages (over quarters)
+    quarterly_exports['exports_ma2'] = quarterly_exports['quarterly_exports_usd_millions'].rolling(window=2).mean()
+    quarterly_exports['exports_ma4'] = quarterly_exports['quarterly_exports_usd_millions'].rolling(window=4).mean()
+    quarterly_exports['exports_ma8'] = quarterly_exports['quarterly_exports_usd_millions'].rolling(window=8).mean()
+    
+    # Year-over-year growth (4 quarters ago)
+    quarterly_exports['exports_yoy'] = quarterly_exports['quarterly_exports_usd_millions'].pct_change(periods=4)
+    
+    # Quarter-over-quarter growth
+    quarterly_exports['exports_qoq'] = quarterly_exports['quarterly_exports_usd_millions'].pct_change(periods=1)
     
     # Time-based features
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-    df['quarter'] = df['date'].dt.quarter
+    quarterly_exports['year'] = quarterly_exports['quarter_end_date'].dt.year
+    quarterly_exports['quarter'] = quarterly_exports['quarter_end_date'].dt.quarter
+    quarterly_exports['fiscal_quarter'] = quarterly_exports['quarter_end_date'].apply(
+        lambda x: {1: 4, 4: 1, 7: 2, 10: 3}[x.month]
+    )
     
-    return df
+    return quarterly_exports
 
 def train_model(X_train, y_train, X_test, y_test, use_cv=True):
     """Train Ridge regression model with cross-validation for optimal regularization."""
@@ -189,9 +230,9 @@ def plot_train_test_comparison(train_dates, y_train, y_train_pred, test_dates, y
     axes[0].plot(test_dates, y_test, 'o-', label='Test Actual', alpha=0.7, color='red')
     axes[0].plot(test_dates, y_test_pred, 'x-', label='Test Predicted', alpha=0.7, color='salmon')
     axes[0].axvline(x=test_dates[0], color='gray', linestyle='--', linewidth=2)
-    axes[0].set_xlabel('Date')
+    axes[0].set_xlabel('Quarter End Date')
     axes[0].set_ylabel('Revenue (Millions USD)')
-    axes[0].set_title('Train vs Test Predictions')
+    axes[0].set_title('Train vs Test Predictions (Quarterly)')
     axes[0].legend()
     axes[0].grid(True, alpha=0.3)
     axes[0].tick_params(axis='x', rotation=45)
@@ -220,69 +261,65 @@ def plot_train_test_comparison(train_dates, y_train, y_train_pred, test_dates, y
     print(f"Diagnostic plot saved to {filepath}")
 
 def main(use_post_surge_only=False, surge_threshold_date='2023-01-01'):
-    """Main prediction pipeline."""
-    print("Nvidia Data Center Revenue Prediction")
+    """Main prediction pipeline: predict quarterly Nvidia revenue from monthly Taiwan exports."""
+    print("Nvidia Quarterly Data Center Revenue Prediction")
     print("=" * 60)
     
-    # Load and prepare Taiwan exports data
+    # Load Taiwan monthly exports data
     taiwan_df = load_taiwan_exports()
     print(f"Loaded {len(taiwan_df)} months of Taiwan exports data")
     
-    taiwan_df = create_features(taiwan_df)
-    taiwan_df = taiwan_df.dropna().reset_index(drop=True)
-    
-    feature_cols = [
-        'monthly_exports_usd_millions', 'exports_lag1', 'exports_lag2', 'exports_lag3',
-        'exports_ma3', 'exports_ma6', 'exports_ma12', 'exports_yoy', 'exports_mom',
-        'year', 'month', 'quarter'
-    ]
-    available_features = [col for col in feature_cols if col in taiwan_df.columns]
-    
-    print(f"Created {len(available_features)} features")
-    
-    # Load Nvidia revenue data
-    nvidia_data = fetch_nvidia_data()
-    if nvidia_data is None:
+    # Load Nvidia quarterly revenue data
+    nvidia_df = fetch_nvidia_data()
+    if nvidia_df is None:
         print("Nvidia data not available. Run process_nvidia_data.py first.")
         return
     
-    nvidia_df = pd.DataFrame(nvidia_data)
-    nvidia_df['date'] = pd.to_datetime(nvidia_df['date'])
+    print(f"Loaded {len(nvidia_df)} quarters of Nvidia revenue data")
+    print(f"Nvidia date range: {nvidia_df['quarter_end_date'].min().date()} to {nvidia_df['quarter_end_date'].max().date()}")
     
-    # Filter Taiwan data to match Nvidia date range
-    first_nvidia_date = nvidia_df['date'].min()
-    last_nvidia_date = nvidia_df['date'].max()
+    # Aggregate monthly Taiwan exports to Nvidia fiscal quarters
+    print("\nAggregating monthly exports to quarterly...")
+    quarterly_exports = aggregate_to_quarters(taiwan_df)
+    quarterly_exports = quarterly_exports.dropna().reset_index(drop=True)
     
-    taiwan_df_filtered = taiwan_df[
-        (taiwan_df['date'] >= first_nvidia_date) & 
-        (taiwan_df['date'] <= last_nvidia_date)
-    ].copy()
+    print(f"Aggregated to {len(quarterly_exports)} quarters")
     
-    # Recreate features on filtered data (ensures proper lag calculations)
-    taiwan_df_filtered = create_features(taiwan_df_filtered)
-    taiwan_df_filtered = taiwan_df_filtered.dropna().reset_index(drop=True)
-    
-    # Merge datasets on date
-    merged_df = pd.merge(taiwan_df_filtered, nvidia_df, on='date', how='inner')
-    merged_df = merged_df.sort_values('date').reset_index(drop=True)
+    # Merge quarterly exports with Nvidia revenue on quarter end date
+    merged_df = pd.merge(
+        quarterly_exports,
+        nvidia_df[['quarter_end_date', 'quarterly_revenue_millions']],
+        on='quarter_end_date',
+        how='inner'
+    )
+    merged_df = merged_df.sort_values('quarter_end_date').reset_index(drop=True)
     
     if len(merged_df) == 0:
-        print("No overlapping dates found")
+        print("No overlapping quarters found")
         return
     
-    print(f"Merged dataset: {len(merged_df)} months")
-    print(f"Date range: {merged_df['date'].min().date()} to {merged_df['date'].max().date()}")
+    print(f"Merged dataset: {len(merged_df)} quarters")
+    print(f"Date range: {merged_df['quarter_end_date'].min().date()} to {merged_df['quarter_end_date'].max().date()}")
     
     # Optional: filter to post-surge period only (2023+)
     surge_threshold = pd.Timestamp(surge_threshold_date)
     if use_post_surge_only:
-        merged_df = merged_df[merged_df['date'] >= surge_threshold].reset_index(drop=True)
-        print(f"Filtered to post-surge: {len(merged_df)} months")
+        merged_df = merged_df[merged_df['quarter_end_date'] >= surge_threshold].reset_index(drop=True)
+        print(f"Filtered to post-surge: {len(merged_df)} quarters")
     
     # Prepare features and target
-    y = merged_df['data_center_revenue_millions'].values
+    feature_cols = [
+        'quarterly_exports_usd_millions', 'exports_lag1', 'exports_lag2', 'exports_lag3',
+        'exports_ma2', 'exports_ma4', 'exports_ma8', 'exports_yoy', 'exports_qoq',
+        'year', 'quarter', 'fiscal_quarter'
+    ]
+    available_features = [col for col in feature_cols if col in merged_df.columns]
+    
+    y = merged_df['quarterly_revenue_millions'].values
     X_merged = merged_df[available_features].fillna(0)
-    dates = merged_df['date'].values
+    dates = merged_df['quarter_end_date'].values
+    
+    print(f"\nUsing {len(available_features)} features: {', '.join(available_features)}")
     
     # Time-based split: 80% train, 20% test (chronological)
     split_idx = int(len(merged_df) * 0.8)
@@ -293,8 +330,8 @@ def main(use_post_surge_only=False, surge_threshold_date='2023-01-01'):
     train_dates = dates[:split_idx]
     test_dates = dates[split_idx:]
     
-    print(f"\nTrain: {len(X_train)} samples ({train_dates[0]} to {train_dates[-1]})")
-    print(f"Test: {len(X_test)} samples ({test_dates[0]} to {test_dates[-1]})")
+    print(f"\nTrain: {len(X_train)} quarters ({train_dates[0]} to {train_dates[-1]})")
+    print(f"Test: {len(X_test)} quarters ({test_dates[0]} to {test_dates[-1]})")
     
     # Train model
     print("\nTraining model...")
@@ -355,15 +392,15 @@ def main(use_post_surge_only=False, surge_threshold_date='2023-01-01'):
     }, model_path)
     print(f"\nModel saved to: {model_path}")
     
-    # Generate predictions for recent months
-    recent_data = taiwan_df_filtered.tail(12)
-    X_recent = recent_data[available_features].fillna(0)
+    # Generate predictions for recent quarters
+    recent_quarters = quarterly_exports.tail(8)  # Last 8 quarters (2 years)
+    X_recent = recent_quarters[available_features].fillna(0)
     X_recent_scaled = metrics['scaler'].transform(X_recent)
     predictions = model.predict(X_recent_scaled)
     
     predictions_df = pd.DataFrame({
-        'date': recent_data['date'].values,
-        'taiwan_exports_millions': recent_data['monthly_exports_usd_millions'].values,
+        'quarter_end_date': recent_quarters['quarter_end_date'].values,
+        'quarterly_exports_millions': recent_quarters['quarterly_exports_usd_millions'].values,
         'predicted_nvidia_revenue_millions': predictions
     })
     

@@ -1,4 +1,4 @@
-"""Process Nvidia quarterly data center revenue and convert to monthly data."""
+"""Process Nvidia quarterly data center revenue data."""
 
 import pandas as pd
 from pathlib import Path
@@ -16,38 +16,22 @@ def parse_value(value_str):
         num = float(value_str)
         return num * 1000 if num > 10 else num
 
-def get_quarter_months(date):
+def get_quarter_end_date(date):
+    """Convert report date to quarter end date based on Nvidia's fiscal calendar."""
     month = date.month
     
-    if month == 1:
-        months = [11, 12, 1]
-    elif month in [4, 5]:
-        months = [2, 3, 4]
-    elif month in [7, 8]:
-        months = [5, 6, 7]
-    elif month == 10:
-        months = [8, 9, 10]
+    # Nvidia fiscal quarters end in: Jan (Q4), Apr (Q1), Jul (Q2), Oct (Q3)
+    if month in [1, 2, 3]:
+        return pd.Timestamp(year=date.year, month=1, day=1)  # Q4 ends in Jan
+    elif month in [4, 5, 6]:
+        return pd.Timestamp(year=date.year, month=4, day=1)  # Q1 ends in Apr
+    elif month in [7, 8, 9]:
+        return pd.Timestamp(year=date.year, month=7, day=1)  # Q2 ends in Jul
     else:
-        if month <= 3:
-            months = [11, 12, 1]
-        elif month <= 6:
-            months = [2, 3, 4]
-        elif month <= 9:
-            months = [5, 6, 7]
-        else:
-            months = [8, 9, 10]
-    
-    quarter_dates = []
-    for m in months:
-        if m in [11, 12]:
-            year = date.year - 1
-        else:
-            year = date.year
-        quarter_dates.append(pd.Timestamp(year=year, month=m, day=1))
-    
-    return quarter_dates
+        return pd.Timestamp(year=date.year, month=10, day=1)  # Q3 ends in Oct
 
 def process_nvidia_quarterly_data():
+    """Process and save Nvidia quarterly revenue data."""
     quarterly_data = [
         ("October 26, 2025", "51.22B"),
         ("July 27, 2025", "41.10B"),
@@ -82,51 +66,38 @@ def process_nvidia_quarterly_data():
     
     for date_str, value_str in quarterly_data:
         date = pd.to_datetime(date_str)
-        quarter_key = (date.year, date.month)
+        quarter_end = get_quarter_end_date(date)
+        quarter_key = (quarter_end.year, quarter_end.month)
         
         if quarter_key in seen_quarters:
             continue
         seen_quarters.add(quarter_key)
         
         parsed_data.append({
-            'quarter_end_date': date,
+            'quarter_end_date': quarter_end,
             'quarterly_revenue_millions': parse_value(value_str)
         })
     
     df_quarterly = pd.DataFrame(parsed_data)
     df_quarterly = df_quarterly.sort_values('quarter_end_date').reset_index(drop=True)
     
+    # Add fiscal quarter labels
+    df_quarterly['fiscal_year'] = df_quarterly['quarter_end_date'].apply(
+        lambda x: x.year if x.month != 1 else x.year - 1
+    )
+    df_quarterly['fiscal_quarter'] = df_quarterly['quarter_end_date'].apply(
+        lambda x: {1: 4, 4: 1, 7: 2, 10: 3}[x.month]
+    )
+    
     print(f"Processing {len(df_quarterly)} quarters")
     print(f"Date range: {df_quarterly['quarter_end_date'].min()} to {df_quarterly['quarter_end_date'].max()}")
     
-    monthly_data = []
-    for _, row in df_quarterly.iterrows():
-        monthly_revenue = row['quarterly_revenue_millions'] / 3.0
-        quarter_months = get_quarter_months(row['quarter_end_date'])
-        
-        for month_date in quarter_months:
-            monthly_data.append({
-                'date': month_date,
-                'data_center_revenue_millions': monthly_revenue
-            })
-    
-    df_monthly = pd.DataFrame(monthly_data)
-    df_monthly = df_monthly.sort_values('date').reset_index(drop=True)
-    df_monthly = df_monthly.drop_duplicates(subset=['date'], keep='first')
-    
-    df_final = df_monthly[['date', 'data_center_revenue_millions']].copy()
-    
-    print(f"Generated {len(df_final)} monthly records")
-    
     PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
-    output_file = PROCESSED_DATA_DIR / "nvidia_data_center_revenue_monthly.csv"
-    df_final.to_csv(output_file, index=False)
+    output_file = PROCESSED_DATA_DIR / "nvidia_data_center_revenue_quarterly.csv"
+    df_quarterly.to_csv(output_file, index=False)
     print(f"Saved to: {output_file}")
     
-    quarterly_output = PROCESSED_DATA_DIR / "nvidia_data_center_revenue_quarterly.csv"
-    df_quarterly.to_csv(quarterly_output, index=False)
-    
-    return df_final
+    return df_quarterly
 
 if __name__ == "__main__":
     process_nvidia_quarterly_data()
